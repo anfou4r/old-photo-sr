@@ -1,10 +1,12 @@
 """Gradio GUI for Old Photo Super-Resolution.
 
 Provides a web-based interface for uploading old photos and
-viewing the super-resolution results side by side.
+viewing the super-resolution results side by side, with optional
+image enhancement post-processing.
 
 Usage:
     python app.py --model checkpoints/best_model.pth
+    python app.py --use_pretrained  # Auto-download Real-ESRGAN weights
 """
 
 import argparse
@@ -24,6 +26,28 @@ from utils import img2tensor, tensor2img
 # Global model reference
 _model = None
 _device = None
+
+PRETRAINED_URL = (
+    'https://github.com/xinntao/Real-ESRGAN/releases/download/'
+    'v0.1.0/RealESRGAN_x4plus.pth'
+)
+
+
+def download_pretrained(save_path='checkpoints/RealESRGAN_x4plus.pth'):
+    """Download Real-ESRGAN pre-trained weights."""
+    save_path = Path(save_path)
+    if save_path.exists():
+        print(f'Pre-trained weights already exist at {save_path}')
+        return str(save_path)
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f'Downloading Real-ESRGAN pre-trained weights...')
+    print(f'URL: {PRETRAINED_URL}')
+
+    import urllib.request
+    urllib.request.urlretrieve(PRETRAINED_URL, str(save_path))
+    print(f'Downloaded to {save_path}')
+    return str(save_path)
 
 
 def load_model(model_path, config_path='configs/train_config.yaml',
@@ -52,25 +76,84 @@ def load_model(model_path, config_path='configs/train_config.yaml',
 
     state_dict = torch.load(model_path, map_location=_device,
                             weights_only=True)
-    if 'model_state_dict' in state_dict:
+    # Support multiple checkpoint formats
+    if 'params_ema' in state_dict:
+        state_dict = state_dict['params_ema']
+    elif 'params' in state_dict:
+        state_dict = state_dict['params']
+    elif 'model_state_dict' in state_dict:
         state_dict = state_dict['model_state_dict']
     elif 'generator' in state_dict:
         state_dict = state_dict['generator']
-    _model.load_state_dict(state_dict)
+    _model.load_state_dict(state_dict, strict=True)
     _model.eval()
 
     print(f'Model loaded from {model_path} on {_device}')
 
 
-def super_resolve(input_image, tile_size=512):
-    """Run super-resolution on an input image.
+def enhance_image(img, brightness=0, contrast=0, saturation=0,
+                  sharpness=0, denoise=0):
+    """Apply post-processing enhancements to the SR output.
+
+    Args:
+        img: Input image (RGB uint8 numpy array).
+        brightness: Brightness adjustment (-50 to 50).
+        contrast: Contrast adjustment (-50 to 50).
+        saturation: Saturation adjustment (-50 to 50).
+        sharpness: Sharpening strength (0 to 100).
+        denoise: Denoising strength (0 to 30).
+
+    Returns:
+        Enhanced image (RGB uint8 numpy array).
+    """
+    result = img.copy()
+
+    # Brightness and contrast
+    if brightness != 0 or contrast != 0:
+        alpha = 1.0 + contrast / 100.0  # contrast factor
+        beta = brightness * 2.55  # brightness offset
+        result = cv2.convertScaleAbs(result, alpha=alpha, beta=beta)
+
+    # Saturation
+    if saturation != 0:
+        hsv = cv2.cvtColor(result, cv2.COLOR_RGB2HSV).astype(np.float32)
+        factor = 1.0 + saturation / 50.0
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * factor, 0, 255)
+        result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
+
+    # Denoising
+    if denoise > 0:
+        result_bgr = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+        result_bgr = cv2.fastNlMeansDenoisingColored(
+            result_bgr, None, denoise, denoise, 7, 21
+        )
+        result = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
+
+    # Sharpening
+    if sharpness > 0:
+        strength = sharpness / 100.0
+        blurred = cv2.GaussianBlur(result, (0, 0), 3)
+        result = cv2.addWeighted(result, 1.0 + strength, blurred,
+                                 -strength, 0)
+
+    return result
+
+
+def super_resolve(input_image, tile_size=512, brightness=0, contrast=0,
+                  saturation=0, sharpness=0, denoise=0):
+    """Run super-resolution on an input image with optional enhancement.
 
     Args:
         input_image: Input image (RGB, numpy array from Gradio).
         tile_size: Tile size for processing large images.
+        brightness: Brightness adjustment.
+        contrast: Contrast adjustment.
+        saturation: Saturation adjustment.
+        sharpness: Sharpening strength.
+        denoise: Denoising strength.
 
     Returns:
-        Super-resolved image (RGB, numpy array).
+        Super-resolved and enhanced image (RGB, numpy array).
     """
     if _model is None:
         return input_image
@@ -90,6 +173,14 @@ def super_resolve(input_image, tile_size=512):
     # Convert back to RGB numpy
     output_bgr = tensor2img(output.float())
     output_rgb = cv2.cvtColor(output_bgr, cv2.COLOR_BGR2RGB)
+
+    # Apply post-processing enhancements
+    if any([brightness, contrast, saturation, sharpness, denoise]):
+        output_rgb = enhance_image(
+            output_rgb, brightness, contrast, saturation,
+            sharpness, denoise
+        )
+
     return output_rgb
 
 
@@ -134,11 +225,12 @@ def _tile_process(img_tensor, tile_size, pad=32):
 
 def build_ui():
     """Build the Gradio interface."""
-    with gr.Blocks() as demo:
+    with gr.Blocks(title='Old Photo Super-Resolution') as demo:
         gr.Markdown(
             '# Old Photo Super-Resolution\n'
             'Upload an old or low-resolution photo to enhance it using '
-            'deep learning-based super-resolution (4x upscaling).'
+            'deep learning-based super-resolution (4x upscaling).\n'
+            'Powered by Real-ESRGAN pre-trained model.'
         )
 
         with gr.Row():
@@ -159,9 +251,30 @@ def build_ui():
                     type='numpy',
                 )
 
+        with gr.Accordion('Image Enhancement (Post-processing)',
+                          open=False):
+            gr.Markdown(
+                'Adjust these sliders to fine-tune the output. '
+                'Click **Enhance Photo** again to apply.'
+            )
+            with gr.Row():
+                brightness = gr.Slider(-50, 50, value=0, step=1,
+                                       label='Brightness')
+                contrast = gr.Slider(-50, 50, value=0, step=1,
+                                     label='Contrast')
+            with gr.Row():
+                saturation = gr.Slider(-50, 50, value=0, step=1,
+                                       label='Saturation')
+                sharpness = gr.Slider(0, 100, value=0, step=1,
+                                      label='Sharpness')
+            with gr.Row():
+                denoise = gr.Slider(0, 30, value=0, step=1,
+                                    label='Denoise Strength')
+
         run_btn.click(
             fn=super_resolve,
-            inputs=[input_image, tile_slider],
+            inputs=[input_image, tile_slider, brightness, contrast,
+                    saturation, sharpness, denoise],
             outputs=output_image,
         )
 
@@ -170,6 +283,8 @@ def build_ui():
             '- For best results, use images smaller than 512x512 pixels\n'
             '- Reduce tile size if you encounter GPU memory errors\n'
             '- The model performs 4x upscaling\n'
+            '- Use the enhancement sliders to adjust brightness, '
+            'contrast, and sharpness after SR\n'
         )
 
     return demo
@@ -178,7 +293,7 @@ def build_ui():
 def main():
     parser = argparse.ArgumentParser(description='Old Photo SR GUI')
     parser.add_argument('--model', type=str,
-                        default='checkpoints/best_model.pth',
+                        default='checkpoints/RealESRGAN_x4plus.pth',
                         help='Model checkpoint path')
     parser.add_argument('--config', type=str,
                         default='configs/train_config.yaml')
@@ -186,10 +301,18 @@ def main():
     parser.add_argument('--port', type=int, default=7860)
     parser.add_argument('--share', action='store_true',
                         help='Create public Gradio link')
+    parser.add_argument('--use_pretrained', action='store_true',
+                        default=True,
+                        help='Download and use Real-ESRGAN pretrained model')
     args = parser.parse_args()
 
-    # Load model
+    # Auto-download pretrained weights if needed
     model_path = Path(args.model)
+    if not model_path.exists() and args.use_pretrained:
+        args.model = download_pretrained()
+        model_path = Path(args.model)
+
+    # Load model
     if model_path.exists():
         load_model(args.model, args.config, args.gpu)
     else:

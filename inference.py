@@ -28,7 +28,7 @@ def parse_args():
     parser.add_argument('--output', type=str, default='results',
                         help='Output directory')
     parser.add_argument('--model', type=str,
-                        default='checkpoints/best_model.pth',
+                        default='checkpoints/RealESRGAN_x4plus.pth',
                         help='Model checkpoint path')
     parser.add_argument('--config', type=str,
                         default='configs/train_config.yaml',
@@ -166,9 +166,13 @@ def main():
         scale=model_cfg['scale'],
     ).to(device)
 
-    # Load weights
+    # Load weights (supports Real-ESRGAN and custom checkpoint formats)
     state_dict = torch.load(args.model, map_location=device, weights_only=True)
-    if 'model_state_dict' in state_dict:
+    if 'params_ema' in state_dict:
+        state_dict = state_dict['params_ema']
+    elif 'params' in state_dict:
+        state_dict = state_dict['params']
+    elif 'model_state_dict' in state_dict:
         state_dict = state_dict['model_state_dict']
     elif 'generator' in state_dict:
         state_dict = state_dict['generator']
