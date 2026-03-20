@@ -134,10 +134,7 @@ def _tile_process(img_tensor, tile_size, pad=32):
 
 def build_ui():
     """Build the Gradio interface."""
-    with gr.Blocks(
-        title='Old Photo Super-Resolution',
-        theme=gr.themes.Soft(),
-    ) as demo:
+    with gr.Blocks() as demo:
         gr.Markdown(
             '# Old Photo Super-Resolution\n'
             'Upload an old or low-resolution photo to enhance it using '
