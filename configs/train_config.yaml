@@ -1,0 +1,70 @@
+# Training configuration for Old Photo Super-Resolution
+
+# Model settings
+model:
+  name: RRDBNet
+  num_in_ch: 3
+  num_out_ch: 3
+  num_feat: 64
+  num_block: 23
+  num_grow_ch: 32
+  scale: 4
+
+# Dataset settings
+dataset:
+  train:
+    data_dir: datasets/train
+    hr_size: 256
+    scale: 4
+    batch_size: 16
+    num_workers: 4
+    use_flip: true
+    use_rot: true
+    use_old_photo_degrade: true
+  val:
+    data_dir: datasets/val
+    hr_size: 256
+    scale: 4
+    batch_size: 1
+    num_workers: 2
+
+# Old photo degradation simulation
+degradation:
+  noise_range: [5, 30]
+  jpeg_quality_range: [30, 85]
+  blur_kernel_size: [3, 7]
+  blur_sigma: [0.5, 3.0]
+  color_jitter: true
+  sepia_prob: 0.3
+  scratch_prob: 0.2
+  vignette_prob: 0.2
+
+# Training settings
+train:
+  total_epochs: 200
+  lr_g: !!float 2e-4
+  lr_d: !!float 1e-4
+  beta1: 0.9
+  beta2: 0.999
+  lr_scheduler: cosine
+  warmup_epochs: 5
+
+  # Loss weights
+  pixel_weight: 1.0
+  perceptual_weight: 1.0
+  gan_weight: 0.1
+
+  # Logging
+  log_interval: 100
+  val_interval: 5
+  save_interval: 10
+  checkpoint_dir: checkpoints
+  log_dir: logs
+
+# Inference settings
+inference:
+  model_path: checkpoints/best_model.pth
+  input_dir: inputs
+  output_dir: results
+  tile_size: 512
+  tile_pad: 32
