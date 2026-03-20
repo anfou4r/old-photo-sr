@@ -249,6 +249,7 @@ def build_ui():
                 output_image = gr.Image(
                     label='Output (Super-Resolved)',
                     type='numpy',
+                    format='png',
                 )
 
         with gr.Accordion('Image Enhancement (Post-processing)',
