@@ -46,8 +46,8 @@ def auto_color_correction(img):
 def remove_scratches(img, strength=50):
     """Remove scratches, fold marks, and spots from old photos.
 
-    Uses morphological operations and inpainting to detect
-    and remove linear artifacts (scratches, fold lines).
+    Uses multi-scale morphological detection and adaptive inpainting
+    to detect and remove linear artifacts (scratches, fold lines, cracks).
 
     Args:
         img: BGR uint8 numpy array.
@@ -58,33 +58,73 @@ def remove_scratches(img, strength=50):
     """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # Detect scratches using morphological gradient
-    # Scratches are thin bright/dark lines
-    kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
-    kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 1))
+    # Multi-scale scratch detection for different scratch widths
+    combined_mask = np.zeros_like(gray)
 
-    # Detect vertical scratches
-    close_h = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel_h)
-    diff_v = cv2.absdiff(gray, close_h)
+    # Scale 1: Fine scratches (thin lines)
+    for length in [15, 25, 35]:
+        kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (1, length))
+        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (length, 1))
 
-    # Detect horizontal scratches
-    close_v = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel_v)
-    diff_h = cv2.absdiff(gray, close_v)
+        close_h = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel_h)
+        diff_v = cv2.absdiff(gray, close_h)
 
-    # Combine scratch masks
-    scratch_mask = cv2.add(diff_v, diff_h)
+        close_v = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel_v)
+        diff_h = cv2.absdiff(gray, close_v)
 
-    # Threshold based on strength
-    thresh = max(10, 50 - strength // 2)
-    _, mask = cv2.threshold(scratch_mask, thresh, 255, cv2.THRESH_BINARY)
+        combined_mask = cv2.add(combined_mask, cv2.add(diff_v, diff_h))
 
-    # Clean up mask
+    # Scale 2: Diagonal scratches using rotated kernels
+    for angle in [45, 135]:
+        k = np.zeros((15, 15), dtype=np.uint8)
+        if angle == 45:
+            for i in range(15):
+                k[i, i] = 1
+        else:
+            for i in range(15):
+                k[i, 14 - i] = 1
+        close_d = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, k)
+        diff_d = cv2.absdiff(gray, close_d)
+        combined_mask = cv2.add(combined_mask, diff_d)
+
+    # Normalize and enhance scratch mask
+    combined_mask = cv2.normalize(combined_mask, None, 0, 255,
+                                  cv2.NORM_MINMAX).astype(np.uint8)
+
+    # Adaptive threshold based on strength
+    thresh = max(5, 45 - int(strength * 0.4))
+    _, mask = cv2.threshold(combined_mask, thresh, 255, cv2.THRESH_BINARY)
+
+    # Also detect dark spots/damage using local statistics
+    blur = cv2.GaussianBlur(gray, (21, 21), 0)
+    local_diff = cv2.absdiff(gray, blur)
+    spot_thresh = max(15, 40 - int(strength * 0.3))
+    _, spot_mask = cv2.threshold(local_diff, spot_thresh, 255,
+                                 cv2.THRESH_BINARY)
+
+    # Keep only small connected components (spots, not large regions)
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        spot_mask, connectivity=8)
+    max_area = img.shape[0] * img.shape[1] * 0.002  # Max 0.2% of image
+    for i in range(1, n_labels):
+        if stats[i, cv2.CC_STAT_AREA] > max_area:
+            spot_mask[labels == i] = 0
+
+    # Combine scratch and spot masks
+    mask = cv2.bitwise_or(mask, spot_mask)
+
+    # Clean up: dilate slightly to cover scratch edges
     kernel_clean = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask = cv2.dilate(mask, kernel_clean, iterations=1)
 
-    # Inpaint scratches
-    result = cv2.inpaint(img, mask, inpaintRadius=3,
-                         flags=cv2.INPAINT_TELEA)
+    # Remove small noise from mask
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+
+    # Use NS inpainting (better for scratches) with adaptive radius
+    inpaint_radius = max(3, min(7, 3 + strength // 25))
+    result = cv2.inpaint(img, mask, inpaintRadius=inpaint_radius,
+                         flags=cv2.INPAINT_NS)
 
     return result
 

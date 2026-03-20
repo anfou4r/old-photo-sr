@@ -307,7 +307,7 @@ def build_ui():
                 )
 
             with gr.Row():
-                enable_scratch = gr.Checkbox(value=False,
+                enable_scratch = gr.Checkbox(value=True,
                                               label='Scratch Removal')
                 scratch_strength = gr.Slider(
                     0, 100, value=50, step=5,
@@ -318,7 +318,7 @@ def build_ui():
                 enable_denoise = gr.Checkbox(value=True,
                                               label='Denoise')
                 denoise_strength = gr.Slider(
-                    1, 30, value=10, step=1,
+                    1, 30, value=5, step=1,
                     label='Denoise Strength',
                 )
 
@@ -337,7 +337,7 @@ def build_ui():
             with gr.Row():
                 saturation = gr.Slider(-50, 50, value=0, step=1,
                                        label='Saturation')
-                sharpness = gr.Slider(0, 100, value=0, step=1,
+                sharpness = gr.Slider(0, 100, value=30, step=1,
                                       label='Sharpness')
 
         run_btn.click(
