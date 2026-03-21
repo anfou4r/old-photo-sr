@@ -44,10 +44,11 @@ def auto_color_correction(img):
 
 
 def remove_scratches(img, strength=50):
-    """Remove scratches, fold marks, and spots from old photos.
+    """Remove scratches, cracks, fold marks, and damage from old photos.
 
-    Uses edge-based detection focused on thin linear artifacts,
-    with strict filtering to avoid damaging photo content.
+    Uses multi-scale detection combining morphological operations, edge
+    detection, and adaptive thresholding to find both fine scratches and
+    heavy cracks. Runs multiple inpainting passes for thorough removal.
 
     Args:
         img: BGR uint8 numpy array.
@@ -58,64 +59,116 @@ def remove_scratches(img, strength=50):
     """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     h_img, w_img = img.shape[:2]
+    img_area = h_img * w_img
 
-    # Blur to reduce texture noise before detection
-    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    # Blur to suppress texture noise
+    blurred = cv2.GaussianBlur(gray, (5, 5), 1.0)
 
-    # Detect thin linear structures using morphological top-hat
-    # Top-hat highlights thin bright/dark lines against background
+    # --- Multi-scale morphological detection ---
+    # Use both white-hat (bright scratches) and black-hat (dark scratches)
+    # with multiple kernel sizes and orientations for full coverage
     scratch_mask = np.zeros(gray.shape, dtype=np.float32)
 
-    for length in [21, 31]:
-        # Vertical scratches (thin horizontal kernel for top-hat)
-        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, length))
-        tophat_v = cv2.morphologyEx(blurred, cv2.MORPH_BLACKHAT, kernel_v)
-        scratch_mask += tophat_v.astype(np.float32)
+    kernel_lengths = [11, 21, 31, 51]
+    for length in kernel_lengths:
+        for angle_kernel in [
+            cv2.getStructuringElement(cv2.MORPH_RECT, (1, length)),   # vertical
+            cv2.getStructuringElement(cv2.MORPH_RECT, (length, 1)),   # horizontal
+        ]:
+            tophat_w = cv2.morphologyEx(blurred, cv2.MORPH_TOPHAT, angle_kernel)
+            tophat_b = cv2.morphologyEx(blurred, cv2.MORPH_BLACKHAT, angle_kernel)
+            scratch_mask += tophat_w.astype(np.float32)
+            scratch_mask += tophat_b.astype(np.float32)
 
-        # Horizontal scratches
-        kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (length, 1))
-        tophat_h = cv2.morphologyEx(blurred, cv2.MORPH_BLACKHAT, kernel_h)
-        scratch_mask += tophat_h.astype(np.float32)
+        # Diagonal detection via rotated kernels (45° and 135°)
+        diag_size = max(3, length // 3)
+        for dx, dy in [(1, 1), (1, -1)]:
+            kern = np.zeros((diag_size, diag_size), dtype=np.uint8)
+            for k in range(diag_size):
+                r = k if dy > 0 else diag_size - 1 - k
+                kern[r, k] = 1
+            tophat_w = cv2.morphologyEx(blurred, cv2.MORPH_TOPHAT, kern)
+            tophat_b = cv2.morphologyEx(blurred, cv2.MORPH_BLACKHAT, kern)
+            scratch_mask += tophat_w.astype(np.float32)
+            scratch_mask += tophat_b.astype(np.float32)
 
-    # Normalize to [0, 255]
+    # --- Edge-based detection for sharp crack boundaries ---
+    # Lower Canny thresholds catch more crack edges
+    canny_lo = max(20, 80 - int(strength * 0.6))
+    canny_hi = canny_lo * 2
+    edges = cv2.Canny(blurred, canny_lo, canny_hi)
+    scratch_mask += edges.astype(np.float32) * 2.0
+
+    # Normalize
     if scratch_mask.max() > 0:
-        scratch_mask = (scratch_mask / scratch_mask.max() * 255.0)
+        scratch_mask = scratch_mask / scratch_mask.max() * 255.0
     scratch_mask = scratch_mask.astype(np.uint8)
 
-    # High threshold to only catch obvious scratches
-    # strength 0 -> thresh 120, strength 100 -> thresh 40
-    thresh = max(40, 120 - int(strength * 0.8))
+    # --- Adaptive thresholding ---
+    # strength 0 -> thresh ~100 (conservative), strength 100 -> thresh ~20
+    thresh = max(20, 100 - int(strength * 0.8))
     _, mask = cv2.threshold(scratch_mask, thresh, 255, cv2.THRESH_BINARY)
 
-    # Thin the mask to single-pixel width for clean detection
-    mask = cv2.ximgproc.thinning(mask) if hasattr(cv2, 'ximgproc') else mask
+    # Dilate to cover the full width of cracks
+    dilate_iters = max(1, 1 + strength // 30)  # 1-4 iterations
+    dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.dilate(mask, dilate_k, iterations=dilate_iters)
 
-    # Dilate slightly so inpainting can cover the scratch width
-    dilate_k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    mask = cv2.dilate(mask, dilate_k, iterations=1)
-
-    # Strict filtering: only keep very elongated, thin components
+    # --- Component filtering (less strict than before) ---
     n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
         mask, connectivity=8)
-    max_area = h_img * w_img * 0.001  # Max 0.1% of image per scratch
-    min_area = 20  # Ignore tiny specks
+    max_area = img_area * 0.02  # Up to 2% of image per crack (was 0.1%)
+    min_area = 10  # Filter tiny noise specks
+    # Minimum aspect ratio depends on strength: lower = accept more shapes
+    min_aspect = max(1.5, 5.0 - strength * 0.035)  # 5.0 -> 1.5
+
     for i in range(1, n_labels):
         area = stats[i, cv2.CC_STAT_AREA]
         sw = stats[i, cv2.CC_STAT_WIDTH]
         sh = stats[i, cv2.CC_STAT_HEIGHT]
         aspect = max(sw, sh) / max(min(sw, sh), 1)
-        # Must be elongated (aspect >= 5), not too large, not too small
-        if area > max_area or area < min_area or aspect < 5:
+
+        if area < min_area:
+            mask[labels == i] = 0
+        elif area > max_area and aspect < min_aspect:
+            # Only filter large blobs if they're not elongated
             mask[labels == i] = 0
 
-    # Small inpaint radius to minimize blurring
-    inpaint_radius = max(2, min(5, 2 + strength // 30))
-    result = cv2.inpaint(img, mask, inpaintRadius=inpaint_radius,
-                         flags=cv2.INPAINT_NS)
+    # --- Multi-pass inpainting for thorough crack removal ---
+    inpaint_radius = max(3, min(10, 3 + strength // 15))
+    result = img.copy()
 
-    # Blend with original to reduce artifacts (keep 70-90% of inpainted)
-    blend = 0.7 + (strength / 100.0) * 0.2  # 0.7 to 0.9
-    result = cv2.addWeighted(result, blend, img, 1.0 - blend, 0)
+    # First pass: main inpainting with Telea (better for large regions)
+    result = cv2.inpaint(result, mask, inpaintRadius=inpaint_radius,
+                         flags=cv2.INPAINT_TELEA)
+
+    # Second pass with Navier-Stokes for smoothing residual artifacts
+    # Re-detect remaining scratches on the inpainted result (catch leftovers)
+    if strength >= 30:
+        gray2 = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+        blurred2 = cv2.GaussianBlur(gray2, (5, 5), 1.0)
+        residual_mask = np.zeros(gray2.shape, dtype=np.float32)
+        for length in [21, 41]:
+            for kern in [
+                cv2.getStructuringElement(cv2.MORPH_RECT, (1, length)),
+                cv2.getStructuringElement(cv2.MORPH_RECT, (length, 1)),
+            ]:
+                residual_mask += cv2.morphologyEx(
+                    blurred2, cv2.MORPH_TOPHAT, kern).astype(np.float32)
+                residual_mask += cv2.morphologyEx(
+                    blurred2, cv2.MORPH_BLACKHAT, kern).astype(np.float32)
+
+        if residual_mask.max() > 0:
+            residual_mask = residual_mask / residual_mask.max() * 255.0
+        residual_mask = residual_mask.astype(np.uint8)
+        _, mask2 = cv2.threshold(residual_mask, thresh + 10, 255,
+                                 cv2.THRESH_BINARY)
+        mask2 = cv2.dilate(mask2, dilate_k, iterations=1)
+        # Only inpaint areas that overlap with original scratch regions
+        mask2 = cv2.bitwise_and(mask2, cv2.dilate(mask, dilate_k, iterations=3))
+        if mask2.any():
+            result = cv2.inpaint(result, mask2, inpaintRadius=inpaint_radius,
+                                 flags=cv2.INPAINT_NS)
 
     return result
 

@@ -187,7 +187,7 @@ def super_resolve(input_image, tile_size=512):
 
 def full_restore(input_image, tile_size=512,
                  enable_sr=True, enable_color_fix=True,
-                 enable_scratch_removal=False, scratch_strength=50,
+                 enable_scratch_removal=True, scratch_strength=70,
                  enable_denoise=True, denoise_strength=10,
                  enable_face=True,
                  brightness=0, contrast=0, saturation=0, sharpness=0):
@@ -307,10 +307,10 @@ def build_ui():
                 )
 
             with gr.Row():
-                enable_scratch = gr.Checkbox(value=False,
-                                              label='Scratch Removal')
+                enable_scratch = gr.Checkbox(value=True,
+                                              label='Scratch/Crack Removal')
                 scratch_strength = gr.Slider(
-                    0, 100, value=50, step=5,
+                    0, 100, value=70, step=5,
                     label='Scratch Detection Sensitivity',
                 )
 
