@@ -307,7 +307,7 @@ def build_ui():
                 )
 
             with gr.Row():
-                enable_scratch = gr.Checkbox(value=True,
+                enable_scratch = gr.Checkbox(value=False,
                                               label='Scratch Removal')
                 scratch_strength = gr.Slider(
                     0, 100, value=50, step=5,
