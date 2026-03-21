@@ -318,7 +318,7 @@ def build_ui():
                 enable_denoise = gr.Checkbox(value=True,
                                               label='Denoise')
                 denoise_strength = gr.Slider(
-                    1, 30, value=5, step=1,
+                    1, 30, value=3, step=1,
                     label='Denoise Strength',
                 )
 

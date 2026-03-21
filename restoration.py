@@ -27,12 +27,12 @@ def auto_color_correction(img):
     l_ch, a_ch, b_ch = cv2.split(lab)
     a_mean = a_ch.mean()
     b_mean = b_ch.mean()
-    # Move towards neutral (128) with 80% strength
-    a_ch = np.clip(a_ch - (a_mean - 128) * 0.8, 0, 255)
-    b_ch = np.clip(b_ch - (b_mean - 128) * 0.8, 0, 255)
+    # Move towards neutral (128) with 50% strength (gentle correction)
+    a_ch = np.clip(a_ch - (a_mean - 128) * 0.5, 0, 255)
+    b_ch = np.clip(b_ch - (b_mean - 128) * 0.5, 0, 255)
 
-    # CLAHE on L channel for contrast enhancement
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    # CLAHE on L channel for gentle contrast enhancement
+    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
     l_uint8 = np.clip(l_ch, 0, 255).astype(np.uint8)
     l_eq = clahe.apply(l_uint8).astype(np.float32)
 
@@ -46,8 +46,8 @@ def auto_color_correction(img):
 def remove_scratches(img, strength=50):
     """Remove scratches, fold marks, and spots from old photos.
 
-    Uses multi-scale morphological detection and adaptive inpainting
-    to detect and remove linear artifacts (scratches, fold lines, cracks).
+    Uses edge-based detection focused on thin linear artifacts,
+    with strict filtering to avoid damaging photo content.
 
     Args:
         img: BGR uint8 numpy array.
@@ -57,63 +57,65 @@ def remove_scratches(img, strength=50):
         Cleaned BGR uint8 numpy array.
     """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    h_img, w_img = img.shape[:2]
 
-    # Multi-scale scratch detection — use float32 to avoid uint8 saturation
-    combined_mask = np.zeros(gray.shape, dtype=np.float32)
+    # Blur to reduce texture noise before detection
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
 
-    # Detect linear scratches at multiple scales
-    for length in [15, 25, 35]:
-        kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (1, length))
-        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (length, 1))
+    # Detect thin linear structures using morphological top-hat
+    # Top-hat highlights thin bright/dark lines against background
+    scratch_mask = np.zeros(gray.shape, dtype=np.float32)
 
-        close_h = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel_h)
-        diff_v = cv2.absdiff(gray, close_h).astype(np.float32)
+    for length in [21, 31]:
+        # Vertical scratches (thin horizontal kernel for top-hat)
+        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, length))
+        tophat_v = cv2.morphologyEx(blurred, cv2.MORPH_BLACKHAT, kernel_v)
+        scratch_mask += tophat_v.astype(np.float32)
 
-        close_v = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel_v)
-        diff_h = cv2.absdiff(gray, close_v).astype(np.float32)
+        # Horizontal scratches
+        kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (length, 1))
+        tophat_h = cv2.morphologyEx(blurred, cv2.MORPH_BLACKHAT, kernel_h)
+        scratch_mask += tophat_h.astype(np.float32)
 
-        combined_mask += diff_v + diff_h
+    # Normalize to [0, 255]
+    if scratch_mask.max() > 0:
+        scratch_mask = (scratch_mask / scratch_mask.max() * 255.0)
+    scratch_mask = scratch_mask.astype(np.uint8)
 
-    # Diagonal scratches
-    for angle in [45, 135]:
-        k = np.zeros((15, 15), dtype=np.uint8)
-        if angle == 45:
-            for i in range(15):
-                k[i, i] = 1
-        else:
-            for i in range(15):
-                k[i, 14 - i] = 1
-        close_d = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, k)
-        diff_d = cv2.absdiff(gray, close_d).astype(np.float32)
-        combined_mask += diff_d
+    # High threshold to only catch obvious scratches
+    # strength 0 -> thresh 120, strength 100 -> thresh 40
+    thresh = max(40, 120 - int(strength * 0.8))
+    _, mask = cv2.threshold(scratch_mask, thresh, 255, cv2.THRESH_BINARY)
 
-    # Normalize float accumulation back to [0, 255] uint8
-    if combined_mask.max() > 0:
-        combined_mask = (combined_mask / combined_mask.max() * 255.0)
-    combined_mask = combined_mask.astype(np.uint8)
+    # Thin the mask to single-pixel width for clean detection
+    mask = cv2.ximgproc.thinning(mask) if hasattr(cv2, 'ximgproc') else mask
 
-    # Adaptive threshold — higher strength = lower threshold = more detection
-    thresh = max(20, 60 - int(strength * 0.4))
-    _, mask = cv2.threshold(combined_mask, thresh, 255, cv2.THRESH_BINARY)
+    # Dilate slightly so inpainting can cover the scratch width
+    dilate_k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    mask = cv2.dilate(mask, dilate_k, iterations=1)
 
-    # Filter: only keep elongated components (scratches are thin/long)
+    # Strict filtering: only keep very elongated, thin components
     n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
         mask, connectivity=8)
-    h_img, w_img = img.shape[:2]
-    max_scratch_area = h_img * w_img * 0.005  # Max 0.5% of image per scratch
+    max_area = h_img * w_img * 0.001  # Max 0.1% of image per scratch
+    min_area = 20  # Ignore tiny specks
     for i in range(1, n_labels):
         area = stats[i, cv2.CC_STAT_AREA]
         sw = stats[i, cv2.CC_STAT_WIDTH]
         sh = stats[i, cv2.CC_STAT_HEIGHT]
         aspect = max(sw, sh) / max(min(sw, sh), 1)
-        # Remove if too large or not elongated enough
-        if area > max_scratch_area or (area > 50 and aspect < 3):
+        # Must be elongated (aspect >= 5), not too large, not too small
+        if area > max_area or area < min_area or aspect < 5:
             mask[labels == i] = 0
 
-    # Use NS inpainting (better for scratches) with adaptive radius
-    inpaint_radius = max(3, min(7, 3 + strength // 25))
+    # Small inpaint radius to minimize blurring
+    inpaint_radius = max(2, min(5, 2 + strength // 30))
     result = cv2.inpaint(img, mask, inpaintRadius=inpaint_radius,
                          flags=cv2.INPAINT_NS)
+
+    # Blend with original to reduce artifacts (keep 70-90% of inpainted)
+    blend = 0.7 + (strength / 100.0) * 0.2  # 0.7 to 0.9
+    result = cv2.addWeighted(result, blend, img, 1.0 - blend, 0)
 
     return result
 
